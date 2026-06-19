@@ -42,3 +42,10 @@ Thumbs.db
 
 # Local SDK config (Unity doesn't usually need this but if you generate one)
 local.properties
+
+# Native plugin (android-plugin) build cache & logs
+.gradle/
+*.log
+# Unity gradle template backups (auto-generated when enabling custom template)
+*.backup
+*.backup.meta

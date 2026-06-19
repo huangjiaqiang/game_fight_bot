@@ -1,6 +1,6 @@
 # FightBot — 体感控制 3D 机甲
 
-参照 [peppapig_jump](../peppapig_jump) 的体感控制流水线(前置摄像头 → MoveNet 17 关键点 → 状态机 → 游戏反馈),用 Unity 6 + Unity Sentis 复刻并扩展为完整 3D 机甲战斗游戏:
+参照 [peppapig_jump](../peppapig_jump) 的体感控制流水线(前置摄像头 → MoveNet 17 关键点 → 状态机 → 游戏反馈),用 Unity 2022.3 + Unity Sentis 2.1 复刻并扩展为完整 3D 机甲战斗游戏:
 
 - **左右倾斜** → 机甲左右移动
 - **前倾/后仰** → 机甲前进/后退
@@ -9,18 +9,20 @@
 - **双脚离地** → 跳跃
 - **蹲下** → 减伤姿态
 
-技术栈:Unity 6 (URP) + Unity Sentis 2.x + MoveNet SinglePose Lightning (TFLite) + Android
+技术栈:Unity 2022.3 LTS (URP 14) + Unity Sentis 2.1.3 + MoveNet SinglePose Lightning (TFLite) + Android
 
-## 一次性环境准备(本机当前没装 Unity Editor)
+> ⚠️ 版本说明:本机为中国区环境。中国区 Unity Hub / 团结引擎 Hub 能装到的最高版本是 **Unity 2022.3.62**(国际版 Unity 6 在中国区渠道拿不到)。
+> 本工程已据此从 Unity 6 **降级到 Unity 2022.3 LTS**:**Sentis 2.1.3 保留**(其包元数据声明 `unity: 2022.3`,本就兼容 2022.3,无需降级),仅 **URP 17→14.0.12**、**ugui 2.0→1.0** 做了降级。`PoseDetector.cs` 维持原 Sentis 2.x 代码不变。仅个人自用,不发布国际市场。
 
-1. 安装 Unity Hub:`brew install --cask unity-hub` (已完成,App 在 `/Applications/Unity Hub.app`)
-2. 打开 Hub → 登录 Unity ID(没有就在 https://unity.com 免费注册)
-3. Hub → Installs → Install Editor → 选 **Unity 6.x LTS**(任意 6000.0.x),右侧模块勾选:
-   - **Android Build Support**(含 OpenJDK + Android SDK + NDK)
-4. Hub → Projects → Add → Add project from disk → 选 `/Users/jiaqianghuang/claude_system/fightbot`
-5. 首次打开会触发依赖下载(`com.unity.sentis` 等),等 Package Manager 跑完
+## 一次性环境准备
 
-> Unity Hub 已用 brew 装好,但 Editor 尚未安装。装 Editor 那步是 GUI 必须你来点。
+1. 打开 `C:\Program Files\Unity Hub`(中国区版本,已安装)
+2. Hub → 登录 Unity ID(没有就在 https://unity.cn/id 免费注册)
+3. Hub → Installs → Install Editor → 选 **Unity 2022.3.62**(中国区 `c1` 版本,如 `2022.3.62f3c1`),右侧模块勾选:
+   - **Android Build Support**(含 OpenJDK + Android SDK + NDK);若只在 Editor 里试跑可暂不勾
+4. Hub → Projects → Add → Add project from disk → 选 `D:\workstation\game_fight_bot`
+5. 首次打开会触发依赖下载(`com.unity.sentis 1.3.0` 等),等 Package Manager 跑完
+   - 若 Hub 提示「项目要求 2022.3.62f1,与已装编辑器不符」,点选已装的 `2022.3.62f3c1` 打开即可(同属 2022.3.62,只需重建 Library)
 
 ## 项目内一次性配置(打开项目后做)
 

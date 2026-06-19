@@ -39,16 +39,26 @@ namespace FightBot.Game
         public Renderer WeaponRenderer;
 
         /// <summary>挂到 Mecha.prefab 上的 material 主色, 可在运行时切换(受击红色等).</summary>
-        static readonly int BaseColorId = Shader.PropertyToID("_BaseColor");
+        // 内置管线 Standard 着色器的主色属性是 _Color (URP 是 _BaseColor, 已弃用 URP)
+        static readonly int BaseColorId = Shader.PropertyToID("_Color");
 
+        Color lastBodyColor = new Color(-1f, -1f, -1f, -1f); // 哨兵: 确保首次写入
         public void SetBodyColor(Color c)
         {
-            if (BodyRenderer != null) BodyRenderer.material.SetColor(BaseColorId, c);
+            // 热路径: ApplyRig 每帧调用. 非受击时颜色恒定, 短路避免每帧 r.materials 分配 GC.
+            if (c == lastBodyColor) return;
+            lastBodyColor = c;
+            SetRendererColor(BodyRenderer, c);
         }
+        public void SetWeaponColor(Color c) => SetRendererColor(WeaponRenderer, c);
 
-        public void SetWeaponColor(Color c)
+        // 遍历 renderer 的所有材质设主色 (FBX SkinnedMeshRenderer 可能多 sub-mesh/材质)
+        static void SetRendererColor(Renderer r, Color c)
         {
-            if (WeaponRenderer != null) WeaponRenderer.material.SetColor(BaseColorId, c);
+            if (r == null) return;
+            var mats = r.materials;
+            for (int i = 0; i < mats.Length; i++)
+                if (mats[i] != null) mats[i].SetColor(BaseColorId, c);
         }
     }
 }

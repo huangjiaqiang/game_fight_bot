@@ -1,4 +1,5 @@
 using FightBot.Motion;
+using Pose = FightBot.Motion.Pose;
 using UnityEngine;
 using UnityEngine.UI;
 

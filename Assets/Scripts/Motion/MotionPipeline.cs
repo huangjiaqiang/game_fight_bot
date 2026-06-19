@@ -1,201 +1,112 @@
 using System;
-using System.Threading.Tasks;
+using FightBot.Game;
 using UnityEngine;
 
 namespace FightBot.Motion
 {
-    using FightBot.Game;
-
     /// <summary>
-    /// 摄像头帧 → 推理 → 状态机 总线 (MonoBehaviour). 对应 peppapig 的 CameraSource + GameEngine.handleCameraFrame.
+    /// 原生 pose 源 (替代 Sentis 推理). 通过 AndroidJavaObject 调用 fightbotpose.aar 里的
+    /// com.fightbot.pose.PosePlugin (CameraX + TFLite, 后台线程推理), 每帧轮询 getLatestPose().
     ///
-    /// 线程模型:
-    /// - 主线程 Update() 拉 WebCamTexture 帧, 节流 33ms 后异步 Task.Run 调 PoseDetector.Detect
-    /// - 后台线程写 latestPose, 主线程读
-    /// - 主线程把 latestPose 喂给 JumpDetector + BodyIntent
+    /// 保持类名/公开成员与原 Sentis 版一致 (LatestPose/BodyIntent/JumpDetector/OnJumpExternal/
+    /// Tick/StartCamera/StopCamera/InferenceFps...), 下游 MechaController/GameManager/DebugBar 零改动.
+    /// Editor 无原生, Tick 不产出 pose (仅真机).
     /// </summary>
     public class MotionPipeline : MonoBehaviour
     {
-        [Tooltip("拖入 Assets/ML/Models/movenet_singlepose_lightning.tflite 对应的 ModelAsset")]
-        public ModelAsset MoveNetModel;
-        public BackendType Backend = BackendType.GPUCompute;
-
-        public PoseDetector PoseDetector { get; private set; }
-        public JumpDetector JumpDetector { get; private set; }
         public BodyIntent BodyIntent { get; } = new BodyIntent();
+        public JumpDetector JumpDetector { get; private set; }
+        public Action<float> OnJumpExternal;
 
-        WebCamTexture webcam;
-        Color32[] rawPixels;
-        Color32[] mirroredPixels;
-        int lastFrameProcessed = -1;
-
-        volatile Pose latestPose;
-        volatile bool frameInFlight;
-        long lastInferMs;
-        const long MinInferIntervalMs = 33;
-
-        public WebCamTexture Webcam => webcam;
-        public Pose LatestPose => latestPose;
+        public Pose LatestPose { get; private set; }
+        public bool IsRunning { get; private set; }
         public int InferenceFps { get; private set; }
         public float LastInferenceMs { get; private set; }
-        long[] inferWindow = new long[16];
-        int inferWindowHead;
-        long lastInferWindowPrune;
 
-        public bool IsRunning { get; private set; }
-        public bool CameraAuthorized { get; private set; }
+        // 原生摄像头/骨骼都在原生侧, Unity 这里没有 (CalibrationUI/PoseOverlayUI 守卫 null 用)
+        public WebCamTexture Webcam => null;
+        public Texture2D ProcessedFrame => null;
 
-        /// <summary>JumpDetector 触发跳跃时回调 (intensity 0~1). 由外部 (GameManager) 订阅.</summary>
-        public Action<float> OnJumpExternal;
+        // 原生插件单例 (Kotlin object PosePlugin 的 INSTANCE)
+        AndroidJavaObject pluginInstance;
 
         void Awake()
         {
-            if (MoveNetModel != null)
+            JumpDetector = new JumpDetector(intensity => OnJumpExternal?.Invoke(intensity));
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
             {
-                PoseDetector = new PoseDetector(MoveNetModel, Backend);
-                JumpDetector = new JumpDetector(intensity => OnJumpExternal?.Invoke(intensity));
-                if (!PoseDetector.Available)
-                    Debug.LogError("[MotionPipeline] MoveNet 模型加载失败, 推理不可用");
+                var jc = new AndroidJavaClass("com.fightbot.pose.PosePlugin");
+                pluginInstance = jc.GetStatic<AndroidJavaObject>("INSTANCE");
             }
-            else
-            {
-                Debug.LogError("[MotionPipeline] MoveNetModel 未在 Inspector 中指定");
-            }
+            catch (Exception e) { Debug.LogError("[MotionPipeline] 获取原生插件失败: " + e); }
+#endif
         }
 
         void OnDestroy()
         {
-            StopCamera();
-            PoseDetector?.Dispose();
-            if (webcam != null) Destroy(webcam);
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try { pluginInstance?.Call("stop"); } catch { }
+#endif
         }
 
         public bool StartCamera(int requestWidth = 640, int requestHeight = 480)
         {
-            if (IsRunning) return true;
-
-            WebCamDevice[] devices = WebCamTexture.devices;
-            int frontIdx = -1;
-            for (int i = 0; i < devices.Length; i++)
-                if (devices[i].isFrontFacing) { frontIdx = i; break; }
-            if (frontIdx < 0 && devices.Length > 0) frontIdx = 0;
-            if (frontIdx < 0)
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (pluginInstance == null) { Debug.LogError("[MotionPipeline] 插件未就绪"); return false; }
+            try
             {
-                Debug.LogError("[MotionPipeline] 未发现任何摄像头");
-                return false;
+                var activity = new AndroidJavaClass("com.unity3d.player.UnityPlayer")
+                    .GetStatic<AndroidJavaObject>("currentActivity");
+                pluginInstance.Call("start", activity);
+                IsRunning = true;
+                return true;
             }
-
-            webcam = new WebCamTexture(devices[frontIdx].name, requestWidth, requestHeight, 30);
-            webcam.Play();
-            IsRunning = true;
-            CameraAuthorized = Application.HasUserAuthorization(UserAuthorization.WebCam);
-            return true;
+            catch (Exception e) { Debug.LogError("[MotionPipeline] start 失败: " + e); return false; }
+#else
+            return false; // Editor 无原生
+#endif
         }
 
         public void StopCamera()
         {
-            if (webcam != null && webcam.isPlaying) webcam.Stop();
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try { pluginInstance?.Call("stop"); } catch { }
+#endif
             IsRunning = false;
         }
 
-        /// <summary>主线程每帧调用 (由 GameManager.Update 调): 抽样 + 异步推理 + 喂状态机.</summary>
         public void Tick(long nowMs)
         {
-            if (IsRunning && webcam != null && webcam.didUpdateThisFrame
-                && !frameInFlight && nowMs - lastInferMs >= MinInferIntervalMs
-                && PoseDetector != null && PoseDetector.Available)
+#if UNITY_ANDROID && !UNITY_EDITOR
+            if (pluginInstance != null)
             {
-                lastInferMs = nowMs;
-                DispatchInference(nowMs);
+                try
+                {
+                    var arr = pluginInstance.Call<float[]>("getLatestPose");
+                    if (arr != null && arr.Length == Pose.KEYPOINT_COUNT * 3)
+                    {
+                        var kps = new KeyPoint[Pose.KEYPOINT_COUNT];
+                        for (int i = 0; i < Pose.KEYPOINT_COUNT; i++)
+                            kps[i] = new KeyPoint(arr[i * 3], arr[i * 3 + 1], arr[i * 3 + 2]);
+                        LatestPose = new Pose(kps);
+                    }
+                    InferenceFps = Mathf.RoundToInt(pluginInstance.Call<float>("getInferenceFps"));
+                    LastInferenceMs = 0f; // 原生后台异步推理, 主线程不阻塞
+                }
+                catch (Exception e) { Debug.LogError("[MotionPipeline] poll 失败: " + e); }
             }
-
-            Pose pose = latestPose;
-            if (JumpDetector != null) JumpDetector.OnPose(pose, nowMs);
-            BodyIntent.Update(pose, nowMs);
-
-            UpdateFps(nowMs);
-        }
-
-        void DispatchInference(long ts)
-        {
-            int w = webcam.width;
-            int h = webcam.height;
-            if (w <= 0 || h <= 0) return;
-
-            if (rawPixels == null || rawPixels.Length < w * h)
-            {
-                rawPixels = new Color32[w * h];
-                mirroredPixels = new Color32[w * h];
-            }
-            webcam.GetPixels32(rawPixels);
-
-            int rot = webcam.videoRotationAngle;
-            int srcW = w, srcH = h;
-            bool swap = (rot == 90 || rot == 270);
-
-            MirrorH(rawPixels, srcW, srcH, mirroredPixels);
-            Color32[] framed = mirroredPixels;
-            if (swap)
-            {
-                framed = Rotate90CW(framed, srcW, srcH);
-                int tmp = srcW; srcW = srcH; srcH = tmp;
-            }
-
-            frameInFlight = true;
-            Color32[] snapshot = framed;
-            int capW = srcW, capH = srcH;
-
-            Task.Run(() =>
-            {
-                long t0 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                Pose result = PoseDetector.Detect(snapshot, capW, capH);
-                long t1 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-                LastInferenceMs = t1 - t0;
-                latestPose = (result != null && result.IsReliable) ? result : null;
-                frameInFlight = false;
-            });
-        }
-
-        static void MirrorH(Color32[] src, int w, int h, Color32[] dst)
-        {
-            for (int y = 0; y < h; y++)
-            {
-                int row = y * w;
-                for (int x = 0; x < w; x++)
-                    dst[row + (w - 1 - x)] = src[row + x];
-            }
-        }
-
-        static Color32[] Rotate90CW(Color32[] src, int w, int h)
-        {
-            var dst = new Color32[w * h];
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                    dst[(h - 1 - y) + x * h] = src[y * w + x];
-            return dst;
-        }
-
-        void UpdateFps(long nowMs)
-        {
-            if (lastInferMs == 0) return;
-            if (nowMs - lastInferWindowPrune > 1000)
-            {
-                int count = 0;
-                long cutoff = nowMs - 1000;
-                for (int i = 0; i < inferWindow.Length; i++)
-                    if (inferWindow[i] > cutoff) count++;
-                InferenceFps = count;
-                lastInferWindowPrune = nowMs;
-            }
-            inferWindow[inferWindowHead] = lastInferMs;
-            inferWindowHead = (inferWindowHead + 1) % inferWindow.Length;
+#endif
+            Pose p = LatestPose;
+            if (JumpDetector != null) JumpDetector.OnPose(p, nowMs);
+            BodyIntent.Update(p, nowMs);
         }
 
         public void ResetDetectors()
         {
             JumpDetector?.Reset();
             BodyIntent.Reset();
-            latestPose = null;
+            LatestPose = null;
         }
     }
 }

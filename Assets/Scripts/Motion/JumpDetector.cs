@@ -1,5 +1,7 @@
 using System;
 using FightBot.Motion;
+using Pose = FightBot.Motion.Pose;
+using UnityEngine;
 
 namespace FightBot.Game
 {
